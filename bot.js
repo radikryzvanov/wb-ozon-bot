@@ -13,7 +13,7 @@ const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
   defaultHeaders: {
-    "HTTP-Referer": "https://t.me", // OpenRouter требует указать источник запроса
+    "HTTP-Referer": "https://t.me",
     "X-Title": "WB/Ozon Card Generator Bot",
   },
 });
@@ -49,6 +49,11 @@ bot.on("message:text", async (ctx) => {
 
   try {
     const completion = await openai.chat.completions.create({
+      // Если бот перестанет отвечать с ошибкой 404 "No endpoints found" —
+      // значит эта бесплатная модель пропала с OpenRouter (список бесплатных
+      // моделей периодически меняется). Зайди на openrouter.ai/models,
+      // поставь фильтр цены "Free" и вставь сюда название другой модели
+      // (в формате "автор/название:free").
       model: "google/gemma-4-26b-a4b-it:free",
       messages: [
         {
