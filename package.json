@@ -1,0 +1,16 @@
+{
+    "name": "wb-ozon-bot",
+    "version": "1.0.0",
+    "description": "Telegram-бот на grammY: генерация описаний карточек WB/Ozon через бесплатную модель Gemini на OpenRouter",
+    "type": "module",
+    "main": "bot.js",
+    "scripts": {
+      "start": "node bot.js",
+      "dev": "node --watch bot.js"
+    },
+    "dependencies": {
+      "dotenv": "^16.4.5",
+      "grammy": "^1.21.1",
+      "openai": "^4.68.0"
+    }
+  }
