@@ -21,6 +21,27 @@ const openai = new OpenAI({
 // 2. Инициализация Telegram-бота
 const bot = new Bot(BOT_TOKEN);
 
+// Сколько бесплатных описаний даём каждому человеку
+const FREE_LIMIT = 3;
+// Переключатель: true — лимиты и оплата работают, false — бот без ограничений
+// (например, пока сам пользуешься ботом как личным инструментом)
+const LIMITS_ENABLED = false;
+// Секретный код разблокировки — сам придумай и впиши в .env / Railway Variables
+// как UNLOCK_CODE. После оплаты присылай этот код клиенту вручную.
+const UNLOCK_CODE = process.env.UNLOCK_CODE || "";
+
+// Простое хранилище использования по пользователям (в памяти процесса).
+// Важно: при перезапуске бота (например, после git push) счётчики обнулятся —
+// для старта это нормально, позже можно заменить на настоящую базу данных.
+const usage = new Map(); // userId -> { used: number, unlocked: boolean }
+
+function getUserUsage(userId) {
+  if (!usage.has(userId)) {
+    usage.set(userId, { used: 0, unlocked: false });
+  }
+  return usage.get(userId);
+}
+
 // Хранит, на каком вопросе сейчас находится каждый пользователь,
 // и что он уже успел рассказать о товаре
 function initialSession() {
@@ -49,6 +70,19 @@ function toTelegramHtml(text) {
 
 // Команда /start — сбрасывает диалог и задаёт первый вопрос
 bot.command("start", async (ctx) => {
+  const userUsage = getUserUsage(ctx.from.id);
+
+  if (LIMITS_ENABLED && !userUsage.unlocked && userUsage.used >= FREE_LIMIT) {
+    await ctx.reply(
+      "🔒 Бесплатный лимит исчерпан (" + FREE_LIMIT + " описаний).\n\n" +
+      "Чтобы продолжить пользоваться ботом без ограничений — напиши мне " +
+      "[впиши сюда свой контакт для оплаты, например @твой_юзернейм], " +
+      "переведи оплату и получи код разблокировки.\n\n" +
+      "После оплаты введи команду:\n/unlock ТВОЙКОД"
+    );
+    return;
+  }
+
   ctx.session = initialSession();
   ctx.session.step = 0;
   await ctx.reply(
@@ -62,6 +96,40 @@ bot.command("start", async (ctx) => {
 bot.command("cancel", async (ctx) => {
   ctx.session = initialSession();
   await ctx.reply("Хорошо, начнём заново, когда будешь готов — просто напиши /start.");
+});
+
+// Команда /unlock КОД — вводится после оплаты, снимает лимит бесплатных попыток
+bot.command("unlock", async (ctx) => {
+  const enteredCode = ctx.match?.trim();
+  const userUsage = getUserUsage(ctx.from.id);
+
+  if (!enteredCode) {
+    await ctx.reply("Напиши код после команды, например:\n/unlock ТВОЙКОД");
+    return;
+  }
+
+  if (!UNLOCK_CODE) {
+    await ctx.reply("Разблокировка сейчас не настроена. Свяжись с администратором бота.");
+    return;
+  }
+
+  if (enteredCode === UNLOCK_CODE) {
+    userUsage.unlocked = true;
+    await ctx.reply("✅ Готово! Лимит снят, можешь генерировать описания без ограничений.");
+  } else {
+    await ctx.reply("❌ Неверный код. Проверь код или свяжись с администратором бота.");
+  }
+});
+
+// Команда /status — сколько бесплатных попыток осталось
+bot.command("status", async (ctx) => {
+  const userUsage = getUserUsage(ctx.from.id);
+  if (userUsage.unlocked) {
+    await ctx.reply("У тебя безлимитный доступ ✅");
+  } else {
+    const left = Math.max(0, FREE_LIMIT - userUsage.used);
+    await ctx.reply(`Бесплатных описаний осталось: ${left} из ${FREE_LIMIT}`);
+  }
 });
 
 bot.on("message:text", async (ctx) => {
@@ -131,7 +199,18 @@ bot.on("message:text", async (ctx) => {
     const responseText = completion.choices[0]?.message?.content;
     if (responseText) {
       await ctx.reply(toTelegramHtml(responseText), { parse_mode: "HTML" });
-      await ctx.reply("Готово! Чтобы составить описание для следующего товара — напиши /start");
+
+      const userUsage = getUserUsage(ctx.from.id);
+      if (LIMITS_ENABLED && !userUsage.unlocked) {
+        userUsage.used += 1;
+        const left = Math.max(0, FREE_LIMIT - userUsage.used);
+        await ctx.reply(
+          `Готово! Осталось бесплатных описаний: ${left}. ` +
+          "Чтобы составить описание для следующего товара — напиши /start"
+        );
+      } else {
+        await ctx.reply("Готово! Чтобы составить описание для следующего товара — напиши /start");
+      }
     } else {
       await ctx.reply("Не удалось получить текст от нейросети.");
     }
