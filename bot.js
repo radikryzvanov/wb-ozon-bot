@@ -229,7 +229,7 @@ bot.on("message:text", async (ctx) => {
  
   try {
     const completion = await openai.chat.completions.create({
-      model: "google/gemma-4-26b-a4b-it:free",
+      model: "dots-studio/dots-3-note-preview:free",
       messages: [
         {
           role: "system",
