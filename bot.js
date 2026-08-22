@@ -1,14 +1,13 @@
 import "dotenv/config";
 import { Bot, session } from "grammy";
 import OpenAI from "openai";
-
+ 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
+ 
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN не задан в .env");
 if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY не задан в .env");
-
-// 1. Инициализация OpenRouter
+ 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
@@ -17,47 +16,34 @@ const openai = new OpenAI({
     "X-Title": "WB/Ozon Card Generator Bot",
   },
 });
-
-// 2. Инициализация Telegram-бота
+ 
 const bot = new Bot(BOT_TOKEN);
-
-// Сколько бесплатных описаний даём каждому человеку
+ 
 const FREE_LIMIT = 3;
-// Переключатель: true — лимиты и оплата работают, false — бот без ограничений
-// (например, пока сам пользуешься ботом как личным инструментом)
 const LIMITS_ENABLED = false;
-// Секретный код разблокировки — сам придумай и впиши в .env / Railway Variables
-// как UNLOCK_CODE. После оплаты присылай этот код клиенту вручную.
 const UNLOCK_CODE = process.env.UNLOCK_CODE || "";
-
-// Простое хранилище использования по пользователям (в памяти процесса).
-// Важно: при перезапуске бота (например, после git push) счётчики обнулятся —
-// для старта это нормально, позже можно заменить на настоящую базу данных.
-const usage = new Map(); // userId -> { used: number, unlocked: boolean }
-
+ 
+const usage = new Map();
+ 
 function getUserUsage(userId) {
   if (!usage.has(userId)) {
     usage.set(userId, { used: 0, unlocked: false });
   }
   return usage.get(userId);
 }
-
-// Хранит, на каком вопросе сейчас находится каждый пользователь,
-// и что он уже успел рассказать о товаре
+ 
 function initialSession() {
-  return { step: null, data: {} };
+  return { step: null, data: {}, lastDescription: null, wbFlow: null };
 }
 bot.use(session({ initial: initialSession }));
-
-// Список вопросов по порядку: [ключ в data, текст вопроса]
+ 
 const QUESTIONS = [
   ["category", "1/4. Какая категория товара? (например: спортивный костюм, кроссовки, чехол для телефона)"],
   ["brand", "2/4. Бренд и материал/состав (если есть)? Если бренда нет — напиши \"без бренда\"."],
   ["features", "3/4. Главные особенности и преимущества товара? (цвет, размеры, для чего подходит, чем отличается от аналогов)"],
   ["keywords", "4/4. Для кого товар и какие ключевые слова важно включить для поиска на маркетплейсе?"],
 ];
-
-// Превращает **жирный** и # Заголовки из ответа модели в HTML, понятный Telegram
+ 
 function toTelegramHtml(text) {
   return text
     .replace(/&/g, "&amp;")
@@ -67,11 +53,54 @@ function toTelegramHtml(text) {
     .replace(/^#{1,6}\s*(.+)$/gm, "<b>$1</b>")
     .replace(/^---+$/gm, "");
 }
-
-// Команда /start — сбрасывает диалог и задаёт первый вопрос
+ 
+async function updateWbCardDescription(wbToken, nmId, newDescription) {
+  const listResponse = await fetch("https://content-api.wildberries.ru/content/v2/get/cards/list", {
+    method: "POST",
+    headers: {
+      "Authorization": wbToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      settings: {
+        filter: { textSearch: String(nmId), withPhoto: -1 },
+        cursor: { limit: 1 },
+      },
+    }),
+  });
+ 
+  if (!listResponse.ok) {
+    throw new Error(`Не удалось получить карточку (${listResponse.status}). Проверь токен и nmID.`);
+  }
+ 
+  const listData = await listResponse.json();
+  const card = listData?.cards?.find((c) => String(c.nmID) === String(nmId));
+  if (!card) {
+    throw new Error("Карточка с таким nmID не найдена в этом магазине.");
+  }
+ 
+  card.description = newDescription;
+ 
+  const updateResponse = await fetch("https://content-api.wildberries.ru/content/v2/cards/update", {
+    method: "POST",
+    headers: {
+      "Authorization": wbToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify([card]),
+  });
+ 
+  if (!updateResponse.ok) {
+    const errText = await updateResponse.text();
+    throw new Error(`WB отклонил обновление (${updateResponse.status}): ${errText}`);
+  }
+ 
+  return true;
+}
+ 
 bot.command("start", async (ctx) => {
   const userUsage = getUserUsage(ctx.from.id);
-
+ 
   if (LIMITS_ENABLED && !userUsage.unlocked && userUsage.used >= FREE_LIMIT) {
     await ctx.reply(
       "🔒 Бесплатный лимит исчерпан (" + FREE_LIMIT + " описаний).\n\n" +
@@ -82,7 +111,7 @@ bot.command("start", async (ctx) => {
     );
     return;
   }
-
+ 
   ctx.session = initialSession();
   ctx.session.step = 0;
   await ctx.reply(
@@ -91,28 +120,26 @@ bot.command("start", async (ctx) => {
     QUESTIONS[0][1]
   );
 });
-
-// Команда /cancel — прервать диалог, если передумал
+ 
 bot.command("cancel", async (ctx) => {
   ctx.session = initialSession();
   await ctx.reply("Хорошо, начнём заново, когда будешь готов — просто напиши /start.");
 });
-
-// Команда /unlock КОД — вводится после оплаты, снимает лимит бесплатных попыток
+ 
 bot.command("unlock", async (ctx) => {
   const enteredCode = ctx.match?.trim();
   const userUsage = getUserUsage(ctx.from.id);
-
+ 
   if (!enteredCode) {
     await ctx.reply("Напиши код после команды, например:\n/unlock ТВОЙКОД");
     return;
   }
-
+ 
   if (!UNLOCK_CODE) {
     await ctx.reply("Разблокировка сейчас не настроена. Свяжись с администратором бота.");
     return;
   }
-
+ 
   if (enteredCode === UNLOCK_CODE) {
     userUsage.unlocked = true;
     await ctx.reply("✅ Готово! Лимит снят, можешь генерировать описания без ограничений.");
@@ -120,8 +147,7 @@ bot.command("unlock", async (ctx) => {
     await ctx.reply("❌ Неверный код. Проверь код или свяжись с администратором бота.");
   }
 });
-
-// Команда /status — сколько бесплатных попыток осталось
+ 
 bot.command("status", async (ctx) => {
   const userUsage = getUserUsage(ctx.from.id);
   if (userUsage.unlocked) {
@@ -131,48 +157,78 @@ bot.command("status", async (ctx) => {
     await ctx.reply(`Бесплатных описаний осталось: ${left} из ${FREE_LIMIT}`);
   }
 });
-
+ 
+bot.command("publish_wb", async (ctx) => {
+  if (!ctx.session.lastDescription) {
+    await ctx.reply("Сначала сгенерируй описание через /start, потом можно будет опубликовать его.");
+    return;
+  }
+  ctx.session.wbFlow = { step: "token" };
+  await ctx.reply(
+    "Чтобы опубликовать описание прямо в карточку на Wildberries, мне нужен твой API-токен.\n\n" +
+    "Как получить: зайди в личный кабинет WB → Настройки → Доступ к API → создай токен " +
+    "с правами на категорию «Контент».\n\n" +
+    "Пришли токен сюда следующим сообщением."
+  );
+});
+ 
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith("/")) return;
-
-  // Если диалог ещё не начат — просим начать с /start
+ 
+  if (ctx.session.wbFlow) {
+    if (ctx.session.wbFlow.step === "token") {
+      ctx.session.wbFlow.token = text.trim();
+      ctx.session.wbFlow.step = "nmId";
+      await ctx.reply("Принято. Теперь пришли nmID карточки товара (номер, видно в личном кабинете рядом с товаром).");
+      return;
+    }
+ 
+    if (ctx.session.wbFlow.step === "nmId") {
+      const nmId = text.trim();
+      const { token } = ctx.session.wbFlow;
+      ctx.session.wbFlow = null;
+ 
+      await ctx.reply("⏳ Обновляю карточку на Wildberries...");
+      try {
+        await updateWbCardDescription(token, nmId, ctx.session.lastDescription);
+        await ctx.reply("✅ Готово! Описание обновлено прямо в карточке на Wildberries.");
+      } catch (err) {
+        console.error("Ошибка публикации на WB:", err.message);
+        await ctx.reply(`❌ Не получилось обновить карточку: ${err.message}`);
+      }
+      return;
+    }
+  }
+ 
   if (ctx.session.step === null) {
     await ctx.reply("Чтобы начать, напиши команду /start — я задам несколько вопросов о товаре.");
     return;
   }
-
-  // Сохраняем ответ на текущий вопрос
+ 
   const [key] = QUESTIONS[ctx.session.step];
   ctx.session.data[key] = text;
-
+ 
   const nextStep = ctx.session.step + 1;
-
-  // Если остались ещё вопросы — задаём следующий
+ 
   if (nextStep < QUESTIONS.length) {
     ctx.session.step = nextStep;
     await ctx.reply(QUESTIONS[nextStep][1]);
     return;
   }
-
-  // Все вопросы собраны — генерируем описание
+ 
   ctx.session.step = null;
   await ctx.reply("⏳ Нейросеть генерирует уникальное описание карточки...");
-
+ 
   const { category, brand, features, keywords } = ctx.session.data;
   const productSummary =
     `Категория: ${category}\n` +
     `Бренд/материал: ${brand}\n` +
     `Особенности и преимущества: ${features}\n` +
     `Для кого и ключевые слова: ${keywords}`;
-
+ 
   try {
     const completion = await openai.chat.completions.create({
-      // Если бот перестанет отвечать с ошибкой 404 "No endpoints found" —
-      // значит эта бесплатная модель пропала с OpenRouter (список бесплатных
-      // моделей периодически меняется). Зайди на openrouter.ai/models,
-      // поставь фильтр цены "Free" и вставь сюда название другой модели
-      // (в формате "автор/название:free").
       model: "google/gemma-4-26b-a4b-it:free",
       messages: [
         {
@@ -195,11 +251,12 @@ bot.on("message:text", async (ctx) => {
         }
       ]
     });
-
+ 
     const responseText = completion.choices[0]?.message?.content;
     if (responseText) {
+      ctx.session.lastDescription = responseText;
       await ctx.reply(toTelegramHtml(responseText), { parse_mode: "HTML" });
-
+ 
       const userUsage = getUserUsage(ctx.from.id);
       if (LIMITS_ENABLED && !userUsage.unlocked) {
         userUsage.used += 1;
@@ -209,12 +266,12 @@ bot.on("message:text", async (ctx) => {
           "Чтобы составить описание для следующего товара — напиши /start"
         );
       } else {
-        await ctx.reply("Готово! Чтобы составить описание для следующего товара — напиши /start");
+        await ctx.reply("Готово! Чтобы составить описание для следующего товара — напиши /start. Чтобы опубликовать его на Wildberries — напиши /publish_wb");
       }
     } else {
       await ctx.reply("Не удалось получить текст от нейросети.");
     }
-
+ 
   } catch (error) {
     console.error("Ошибка обращения к OpenRouter:", error?.status, error?.message, error?.error);
     const status = error?.status;
@@ -224,11 +281,10 @@ bot.on("message:text", async (ctx) => {
     await ctx.reply(`❌ Ошибка обращения к ИИ (${status ?? "?"}). ${hint}`);
   }
 });
-
-// Запуск бота
+ 
 async function main() {
   console.log("Запускаем ИИ-бота...");
   await bot.start();
 }
-
+ 
 main();
