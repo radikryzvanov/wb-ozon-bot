@@ -5,12 +5,13 @@
     "type": "module",
     "main": "bot.js",
     "scripts": {
-      "start": "node bot.js",
-      "dev": "node --watch bot.js"
+        "start": "node bot.js",
+        "dev": "node --watch bot.js"
     },
     "dependencies": {
-      "dotenv": "^16.4.5",
-      "grammy": "^1.21.1",
-      "openai": "^4.68.0"
+        "dotenv": "^16.4.5",
+        "grammy": "^1.21.1",
+        "openai": "^4.68.0",
+        "sharp": "^0.35.3"
     }
-  }
+}
